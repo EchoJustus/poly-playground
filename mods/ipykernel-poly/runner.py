@@ -1,14 +1,14 @@
 import base64
 import json
-import re
 
+# import re
 import requests
 from ipykernel.kernelbase import Kernel
 
 
 class PolyRunnerKernel(Kernel):
     implementation = "PolyRunner"
-    implementation_version = "2.0"
+    implementation_version = "2.1"
     language = "markdown"
     language_version = "1.0"
     language_info = {
@@ -28,32 +28,28 @@ class PolyRunnerKernel(Kernel):
         **kwargs,
     ):
         if not silent:
-            # 1. 解析代码：分离 语言标记(lang) 和 实际内容(content)
-            lang, content = self._parse_code_block(code)
-
-            # 2. 路由分发 (Dispatcher)
-            # 这里是核心：根据提取到的 lang 决定调用哪个函数
             try:
+                # 1. 鲁棒解析：不再单纯依赖正则
+                lang, content = self._parse_code_block(code)
+
+                # 2. 调试回显：如果解析失败，让我们知道 (调试用，稳定后可注释)
+                # self._send_text(f"[Debug] Detected Lang: {lang}")
+
+                # 3. 路由分发
                 if lang == "mermaid":
                     self._handle_mermaid(content)
-
                 elif lang == "plantuml":
                     self._handle_plantuml(content)
-
                 elif lang == "json":
                     self._handle_json_format(content)
-
                 elif lang == "detect":
-                    # 如果没有 ```标记，尝试自动推断
                     self._handle_auto_detect(content)
-
                 else:
-                    self._send_text(
-                        f"No handler for language: '{lang}'.\nContent echo:\n{content[:50]}..."
-                    )
+                    # 如果有语言标记但没处理器 (比如 ```python)，还是原样返回吧
+                    self._send_text(f"No handler for: {lang}\n{content[:30]}...")
 
             except Exception as e:
-                self._send_text(f"Execution Error: {str(e)}")
+                self._send_text(f"Kernel Critical Error: {str(e)}")
 
         return {
             "status": "ok",
@@ -64,64 +60,73 @@ class PolyRunnerKernel(Kernel):
 
     def _parse_code_block(self, raw_code):
         """
-        解析输入字符串。
-        返回: (language_type, clean_content)
+        通过行分析来解析代码块，比正则更稳定
         """
-        raw_code = raw_code.strip()
-
-        # 正则匹配：以 ```开头，后跟语言标识符，最后以 ```结尾(可选)
-        # 捕获组1: 语言标识符 (如 mermaid)
-        # 捕获组2: 内容
-        pattern = r"^```(\w+)\s*\n([\s\S]*?)(?:```)?$"
-        match = re.match(pattern, raw_code)
-
-        if match:
-            lang = match.group(1).lower()
-            content = match.group(2).strip()
-            return lang, content
-        else:
-            # 用户可能直接选中了内部文本，没有带 ```
+        lines = raw_code.strip().splitlines()
+        if not lines:
             return "detect", raw_code
 
-    # --- Handlers (处理器) ---
+        first_line = lines[0].strip()
+
+        # 检查是否以 ``` 开头
+        if first_line.startswith("```"):
+            # 提取语言标识 (例如: ```mermaid -> mermaid)
+            lang = first_line.lstrip("`").strip().lower()
+
+            # 提取内容：去掉第一行，如果最后一行也是 ``` 则去掉
+            content_lines = lines[1:]
+            if content_lines and content_lines[-1].strip().startswith("```"):
+                content_lines.pop()
+
+            return lang, "\n".join(content_lines)
+
+        return "detect", raw_code
 
     def _handle_mermaid(self, code):
-        """Mermaid 处理器: 调用 mermaid.ink"""
-        graphbytes = code.encode("utf8")
-        base64_bytes = base64.b64encode(graphbytes)
-        base64_string = base64_bytes.decode("ascii")
-        url = "https://mermaid.ink/img/" + base64_string
+        """Mermaid 处理器 (带超时控制)"""
+        try:
+            # 清理一下可能存在的首尾空白
+            clean_code = code.strip()
+            if not clean_code:
+                self._send_text("Empty Mermaid code block.")
+                return
 
-        response = requests.get(url)
-        if response.status_code == 200:
-            self._display_image(response.content, "jpeg")
-        else:
-            self._send_text(f"Mermaid Render Failed (HTTP {response.status_code})")
+            graphbytes = clean_code.encode("utf8")
+            base64_bytes = base64.b64encode(graphbytes)
+            base64_string = base64_bytes.decode("ascii")
+            url = "https://mermaid.ink/img/" + base64_string
+
+            # 增加 timeout，防止网络卡死导致前端无响应
+            response = requests.get(url, timeout=10)
+
+            if response.status_code == 200:
+                self._display_image(response.content, "jpeg")
+            else:
+                self._send_text(f"Mermaid Render Error (HTTP {response.status_code})")
+
+        except requests.exceptions.RequestException as e:
+            self._send_text(f"Network Error (Check mermaid.ink access): {e}")
+        except Exception as e:
+            self._send_text(f"Mermaid Handler Error: {e}")
 
     def _handle_plantuml(self, code):
-        """
-        PlantUML 处理器
-        注意：PlantUML 官方使用的是自定义的压缩算法(Deflate+非标准Base64)，而非标准Base64。
-        这里为了演示，假设你有一个支持标准Base64或者Raw文本的PlantUML代理服务。
-        如果没有，推荐使用简单的 hex 编码传给某些支持 hex 的公开 server，或者提示用户安装本地库。
-        """
-        # 这是一个简单的演示，实际 PlantUML 编码比较复杂，建议作为下一步扩展
-        self._send_text(
-            f"PlantUML Handler triggered!\n(To render PlantUML, a specific compression algo is needed.\nCode received: {code[:30]}...)"
-        )
+        self._send_text(f"PlantUML not implemented yet.\nCode: {code[:20]}...")
 
     def _handle_json_format(self, code):
-        """实用工具示例：格式化 JSON"""
         try:
-            obj = json.loads(code)
+            # 尝试处理包含 ```json wrapper 的情况 (虽然 _parse_code_block 应该已经处理了)
+            clean_code = code.strip()
+            obj = json.loads(clean_code)
             formatted = json.dumps(obj, indent=4, ensure_ascii=False)
             self._send_text(formatted)
-        except json.JSONDecodeError:
-            self._send_text("Invalid JSON content.")
+        except json.JSONDecodeError as e:
+            self._send_text(f"Invalid JSON: {e}")
 
     def _handle_auto_detect(self, code):
-        """无标记时的智能回退逻辑"""
-        # 旧的关键词检测逻辑放在这里
+        """智能回退：尝试在无 ``` 标记的情况下猜测"""
+        c = code.strip()
+
+        # 常见 Mermaid 关键字
         mermaid_keywords = [
             "graph ",
             "flowchart ",
@@ -129,18 +134,18 @@ class PolyRunnerKernel(Kernel):
             "classDiagram",
             "pie",
             "gantt",
+            "erDiagram",
         ]
-        if any(code.startswith(kw) for kw in mermaid_keywords):
-            self._handle_mermaid(code)
-        elif code.startswith("{") or code.startswith("["):
-            self._handle_json_format(code)
-        else:
-            self._send_text(code)  # 原样返回
 
-    # --- Output Helpers ---
+        if any(c.startswith(kw) for kw in mermaid_keywords):
+            self._handle_mermaid(c)
+        elif c.startswith("{") or c.startswith("["):
+            self._handle_json_format(c)
+        else:
+            # 既没有 ``` 标记，也不像 Mermaid，原样回显
+            self._send_text(code)
 
     def _display_image(self, image_data, format="jpeg"):
-        """发送图片到前端"""
         self.send_response(
             self.iopub_socket,
             "display_data",
@@ -153,7 +158,6 @@ class PolyRunnerKernel(Kernel):
         )
 
     def _send_text(self, text):
-        """发送文本到前端"""
         stream_content = {"name": "stdout", "text": text}
         self.send_response(self.iopub_socket, "stream", stream_content)
 
